@@ -5,12 +5,12 @@ const cors = require('cors');
 const dotenv = require('dotenv');
 const path = require('path');
 const fs = require('fs');
+const dns = require('dns');
 
-// Load environment variables
 dotenv.config();
 
 const app = express();
-const dns = require('dns');
+
 dns.setServers(['8.8.8.8', '1.1.1.1', '8.8.4.4']);
 
 // Ensure uploads directory exists
@@ -20,7 +20,6 @@ if (!fs.existsSync(uploadDir)) {
   console.log('📁 Uploads directory created');
 }
 
-// FIXED: CORS configuration - allow all necessary headers
 const allowedOrigins = [
   'http://localhost:3000',
   'http://localhost:5000',
@@ -31,13 +30,13 @@ const allowedOrigins = [
 
 app.use(cors({
   origin: function(origin, callback) {
-    // Allow requests with no origin (like mobile apps, curl, etc)
     if (!origin) return callback(null, true);
-    if (allowedOrigins.indexOf(origin) !== -1 || process.env.NODE_ENV !== 'production') {
+
+    if (allowedOrigins.includes(origin) || process.env.NODE_ENV !== 'production') {
       callback(null, true);
     } else {
       console.log('CORS blocked for origin:', origin);
-      callback(null, true); // Allow all in development
+      callback(new Error('Not allowed by CORS'));
     }
   },
   methods: ['GET', 'POST', 'DELETE', 'PUT', 'OPTIONS'],
@@ -56,27 +55,21 @@ app.use(cors({
   preflightContinue: false
 }));
 
-// Handle preflight requests explicitly
 app.options('*', cors());
 
-// Body parsing middleware
 app.use(express.json({ limit: '200mb' }));
 app.use(express.urlencoded({ extended: true, limit: '200mb' }));
 
-// Static files
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
-// Request logging middleware
 app.use((req, res, next) => {
   console.log(`📡 ${req.method} ${req.url} - ${new Date().toISOString()}`);
 
-  // Set timeout for long requests (plagiarism checks)
-  req.setTimeout(1800000, () => { // 30 minutes
+  req.setTimeout(1800000, () => {
     console.error(`⏰ Request timeout: ${req.method} ${req.url}`);
   });
 
-  // Response timeout
-  res.setTimeout(1800000, () => { // 30 minutes
+  res.setTimeout(1800000, () => {
     console.error(`⏰ Response timeout: ${req.method} ${req.url}`);
     if (!res.headersSent) {
       res.status(504).json({
@@ -89,21 +82,20 @@ app.use((req, res, next) => {
   next();
 });
 
-// MongoDB Connection with options
 const mongooseOptions = {
   useNewUrlParser: true,
   useUnifiedTopology: true,
   serverSelectionTimeoutMS: 30000,
-  socketTimeoutMS: 1800000, // 30 minutes
+  socketTimeoutMS: 1800000,
   family: 4
 };
 
 const connectDB = async () => {
   try {
-    const mongoUri = process.env.MONGODB_URI ;
+    const mongoUri = process.env.MONGODB_URI;
 
     console.log('🛢️ Attempting MongoDB connection...');
-    console.log('🛢️ Using URI source:', process.env.MONGODB_URI ? 'MONGODB_URI from env' : 'local fallback');
+    console.log('🛢️ Using URI source:', process.env.MONGODB_URI ? 'MONGODB_URI from env' : 'missing');
 
     const conn = await mongoose.connect(mongoUri, mongooseOptions);
 
@@ -113,11 +105,11 @@ const connectDB = async () => {
     try {
       await conn.connection.db.collection('reports').createIndex({ createdAt: -1 });
       await conn.connection.db.collection('reports').createIndex({ fileName: 1 });
+      await conn.connection.db.collection('useraccesses').createIndex({ userKey: 1 }, { unique: true });
       console.log('📊 Database indexes created');
     } catch (indexErr) {
       console.log('Note: Indexes may already exist');
     }
-
   } catch (error) {
     console.error('❌ MongoDB Connection Error:', error.message);
     console.log('⚠️ Make sure MongoDB Atlas URI is correct and network access is allowed');
@@ -127,7 +119,6 @@ const connectDB = async () => {
 
 connectDB();
 
-// MongoDB listeners
 mongoose.connection.on('error', err => {
   console.error('❌ MongoDB connection error:', err);
 });
@@ -137,16 +128,15 @@ mongoose.connection.on('disconnected', () => {
   setTimeout(connectDB, 5000);
 });
 
-// API Routes
 try {
   app.use('/api/plagiarism', require('./routes/plagiarismRoutes'));
   app.use('/api/reports', require('./routes/reportRoutes'));
+  app.use('/api/payment', require('./routes/paymentRoutes'));
   console.log('✅ Routes loaded successfully');
 } catch (error) {
   console.error('❌ Error loading routes:', error.message);
 }
 
-// API Key status endpoint
 app.get('/api/status', (req, res) => {
   const apiStatus = {
     google: {
@@ -181,6 +171,11 @@ app.get('/api/status', (req, res) => {
     exa: {
       enabled: !!process.env.EXA_API_KEY,
       keyPresent: !!process.env.EXA_API_KEY
+    },
+    razorpay: {
+      enabled: !!(process.env.RAZORPAY_KEY_ID && process.env.RAZORPAY_KEY_SECRET),
+      keyPresent: !!process.env.RAZORPAY_KEY_ID,
+      secretPresent: !!process.env.RAZORPAY_KEY_SECRET
     }
   };
 
@@ -198,7 +193,6 @@ app.get('/api/status', (req, res) => {
   });
 });
 
-// Health check
 app.get('/health', (req, res) => {
   res.json({
     success: true,
@@ -211,12 +205,11 @@ app.get('/health', (req, res) => {
   });
 });
 
-// Root endpoint
 app.get('/', (req, res) => {
   res.json({
     success: true,
     message: '📚 Plagiarism Detector API',
-    version: '2.0.0',
+    version: '2.1.0',
     endpoints: {
       health: '/health',
       status: '/api/status',
@@ -226,36 +219,23 @@ app.get('/', (req, res) => {
       report: '/api/plagiarism/report/:id (GET)',
       reports: '/api/reports (GET)',
       download: '/api/reports/download/:id (GET)',
-      delete: '/api/reports/:id (DELETE)'
-    },
-    apis: {
-      google: !!(process.env.GOOGLE_API_KEY && process.env.GOOGLE_CX) ? '✅ Configured' : '❌ Not configured',
-      serpapi: !!process.env.SERPAPI_KEY ? '✅ Configured' : '❌ Not configured',
-      core: !!process.env.CORE_API_KEY ? '✅ Configured' : '❌ Not configured',
-      crossref: !!process.env.CROSSREF_EMAIL ? '✅ Configured' : '❌ Not configured'
+      delete: '/api/reports/:id (DELETE)',
+      createOrder: '/api/payment/create-order (POST)',
+      verifyPayment: '/api/payment/verify (POST)',
+      usageStatus: '/api/payment/usage-status (GET)',
+      incrementUsage: '/api/payment/increment-usage (POST)'
     },
     timestamp: new Date()
   });
 });
 
-// 404 handler
 app.use('*', (req, res) => {
   res.status(404).json({
     success: false,
-    message: `Route ${req.originalUrl} not found`,
-    availableEndpoints: [
-      '/',
-      '/health',
-      '/api/status',
-      '/api/plagiarism/check-file (POST)',
-      '/api/plagiarism/check-text (POST)',
-      '/api/plagiarism/history (GET)',
-      '/api/plagiarism/report/:id (GET)'
-    ]
+    message: `Route ${req.originalUrl} not found`
   });
 });
 
-// Error handling middleware
 app.use((err, req, res, next) => {
   console.error('❌ Server Error:', err.stack);
 
@@ -287,29 +267,21 @@ const server = app.listen(PORT, () => {
 ┌─────────────────────────────────────┐
 │  🚀 Plagiarism Detector Server      │
 ├─────────────────────────────────────┤
-│  📡 Port: ${PORT}                         │
-│  🌐 URL: http://localhost:${PORT}        │
-│  ⏰ Timeout: 30 minutes              │
-│  📁 Uploads: ${uploadDir}     │
-│  🔑 APIs: ${Object.entries({
-    Google: !!(process.env.GOOGLE_API_KEY && process.env.GOOGLE_CX),
-    SerpAPI: !!process.env.SERPAPI_KEY,
-    CORE: !!process.env.CORE_API_KEY,
-    Crossref: !!process.env.CROSSREF_EMAIL
-  }).filter(([_, v]) => v).map(([k]) => k).join(', ') || 'None'}
+│  📡 Port: ${PORT}
+│  🌐 URL: http://localhost:${PORT}
+│  ⏰ Timeout: 30 minutes
+│  📁 Uploads: ${uploadDir}
+│  💳 Razorpay: ${process.env.RAZORPAY_KEY_ID ? 'Enabled' : 'Disabled'}
 ├─────────────────────────────────────┤
-│  ✅ Server is ready                  │
-│  📝 Check /health for status         │
+│  ✅ Server is ready                 │
 └─────────────────────────────────────┘
   `);
 });
 
-// Server timeout configuration
-server.timeout = 1800000;        // 30 minutes
+server.timeout = 1800000;
 server.keepAliveTimeout = 1800000;
-server.headersTimeout = 1810000; // slightly higher
+server.headersTimeout = 1810000;
 
-// Graceful shutdown
 process.on('SIGTERM', () => {
   console.log('👋 SIGTERM received: closing HTTP server...');
   server.close(() => {
