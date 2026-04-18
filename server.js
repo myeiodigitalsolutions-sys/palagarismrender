@@ -132,6 +132,7 @@ try {
   app.use('/api/plagiarism', require('./routes/plagiarismRoutes'));
   app.use('/api/reports', require('./routes/reportRoutes'));
   app.use('/api/payment', require('./routes/paymentRoutes'));
+  app.use('/api/admin', require('./routes/adminRoutes'));
   console.log('✅ Routes loaded successfully');
 } catch (error) {
   console.error('❌ Error loading routes:', error.message);

@@ -12,7 +12,6 @@ const getUserKey = (req) => {
   const email = (req.headers['x-user-email'] || req.body.userEmail || '').trim().toLowerCase();
   const phone = (req.headers['x-user-phone'] || req.body.userPhone || '').trim();
   const userId = (req.headers['x-user-id'] || req.body.userId || '').trim();
-
   return email || phone || userId;
 };
 
@@ -21,39 +20,30 @@ const razorpay = new Razorpay({
   key_secret: process.env.RAZORPAY_KEY_SECRET,
 });
 
-// Create order
 router.post('/create-order', async (req, res) => {
   try {
     const userKey = getUserKey(req);
+    const userName = (req.body.userName || '').trim();
     const userEmail = (req.headers['x-user-email'] || req.body.userEmail || '').trim();
     const userPhone = (req.headers['x-user-phone'] || req.body.userPhone || '').trim();
 
     if (!userKey) {
-      return res.status(400).json({
-        success: false,
-        message: 'User identity is required',
-      });
+      return res.status(400).json({ success: false, message: 'User identity is required' });
     }
 
-    const options = {
+    const order = await razorpay.orders.create({
       amount: PREMIUM_AMOUNT * 100,
       currency: 'INR',
       receipt: `rcpt_${Date.now()}`,
-      notes: {
-        userKey,
-        userEmail,
-        userPhone,
-        product: 'plagiarism-premium',
-      },
-    };
-
-    const order = await razorpay.orders.create(options);
+      notes: { userKey, userEmail, userPhone, userName },
+    });
 
     await UserAccess.findOneAndUpdate(
       { userKey },
       {
         $set: {
           userKey,
+          userName,
           userEmail,
           userPhone,
           razorpayOrderId: order.id,
@@ -62,7 +52,7 @@ router.post('/create-order', async (req, res) => {
       { upsert: true, new: true }
     );
 
-    return res.json({
+    res.json({
       success: true,
       order,
       key: process.env.RAZORPAY_KEY_ID,
@@ -70,24 +60,20 @@ router.post('/create-order', async (req, res) => {
     });
   } catch (error) {
     console.error('CREATE ORDER ERROR:', error);
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to create Razorpay order',
-      error: process.env.NODE_ENV === 'development' ? error.message : undefined,
-    });
+    res.status(500).json({ success: false, message: 'Failed to create Razorpay order' });
   }
 });
 
-// Verify payment
 router.post('/verify', async (req, res) => {
   try {
     const {
       razorpay_order_id,
       razorpay_payment_id,
       razorpay_signature,
+      userId,
+      userName,
       userEmail,
       userPhone,
-      userId,
     } = req.body;
 
     const userKey =
@@ -95,18 +81,8 @@ router.post('/verify', async (req, res) => {
       (userPhone || '').trim() ||
       (userId || '').trim();
 
-    if (!userKey) {
-      return res.status(400).json({
-        success: false,
-        message: 'User identity is required',
-      });
-    }
-
-    if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature) {
-      return res.status(400).json({
-        success: false,
-        message: 'Missing payment verification fields',
-      });
+    if (!userKey || !razorpay_order_id || !razorpay_payment_id || !razorpay_signature) {
+      return res.status(400).json({ success: false, message: 'Missing payment details' });
     }
 
     const generatedSignature = crypto
@@ -115,10 +91,7 @@ router.post('/verify', async (req, res) => {
       .digest('hex');
 
     if (generatedSignature !== razorpay_signature) {
-      return res.status(400).json({
-        success: false,
-        message: 'Invalid payment signature',
-      });
+      return res.status(400).json({ success: false, message: 'Invalid payment signature' });
     }
 
     const updatedUser = await UserAccess.findOneAndUpdate(
@@ -126,6 +99,7 @@ router.post('/verify', async (req, res) => {
       {
         $set: {
           userKey,
+          userName: userName || '',
           userEmail: userEmail || '',
           userPhone: userPhone || '',
           isPaid: true,
@@ -138,7 +112,7 @@ router.post('/verify', async (req, res) => {
       { upsert: true, new: true }
     );
 
-    return res.json({
+    res.json({
       success: true,
       message: 'Payment verified successfully',
       data: {
@@ -148,26 +122,19 @@ router.post('/verify', async (req, res) => {
     });
   } catch (error) {
     console.error('VERIFY PAYMENT ERROR:', error);
-    return res.status(500).json({
-      success: false,
-      message: 'Payment verification failed',
-      error: process.env.NODE_ENV === 'development' ? error.message : undefined,
-    });
+    res.status(500).json({ success: false, message: 'Payment verification failed' });
   }
 });
 
-// Get usage status
 router.get('/usage-status', async (req, res) => {
   try {
     const userKey = getUserKey(req);
-    const userEmail = (req.headers['x-user-email'] || '').trim();
-    const userPhone = (req.headers['x-user-phone'] || '').trim();
+    const userName = (req.query.userName || '').trim();
+    const userEmail = (req.headers['x-user-email'] || req.query.userEmail || '').trim();
+    const userPhone = (req.headers['x-user-phone'] || req.query.userPhone || '').trim();
 
     if (!userKey) {
-      return res.status(400).json({
-        success: false,
-        message: 'User identity is required',
-      });
+      return res.status(400).json({ success: false, message: 'User identity is required' });
     }
 
     let user = await UserAccess.findOne({ userKey });
@@ -175,6 +142,7 @@ router.get('/usage-status', async (req, res) => {
     if (!user) {
       user = await UserAccess.create({
         userKey,
+        userName,
         userEmail,
         userPhone,
         freeChecksUsed: 0,
@@ -182,38 +150,30 @@ router.get('/usage-status', async (req, res) => {
       });
     }
 
-    return res.json({
+    res.json({
       success: true,
       data: {
         freeChecksUsed: user.freeChecksUsed,
-        freeChecksLeft: user.isPaid
-          ? 'Unlimited'
-          : Math.max(LOGGED_IN_FREE_CHECK_LIMIT - user.freeChecksUsed, 0),
+        freeChecksLeft: user.isPaid ? 'Unlimited' : Math.max(LOGGED_IN_FREE_CHECK_LIMIT - user.freeChecksUsed, 0),
         isPaid: user.isPaid,
         paidAt: user.paidAt,
       },
     });
   } catch (error) {
     console.error('USAGE STATUS ERROR:', error);
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to fetch usage status',
-    });
+    res.status(500).json({ success: false, message: 'Failed to fetch usage status' });
   }
 });
 
-// Increment usage after successful plagiarism check
 router.post('/increment-usage', async (req, res) => {
   try {
     const userKey = getUserKey(req);
+    const userName = (req.body.userName || '').trim();
     const userEmail = (req.headers['x-user-email'] || req.body.userEmail || '').trim();
     const userPhone = (req.headers['x-user-phone'] || req.body.userPhone || '').trim();
 
     if (!userKey) {
-      return res.status(400).json({
-        success: false,
-        message: 'User identity is required',
-      });
+      return res.status(400).json({ success: false, message: 'User identity is required' });
     }
 
     let user = await UserAccess.findOne({ userKey });
@@ -221,6 +181,7 @@ router.post('/increment-usage', async (req, res) => {
     if (!user) {
       user = await UserAccess.create({
         userKey,
+        userName,
         userEmail,
         userPhone,
         freeChecksUsed: 0,
@@ -238,25 +199,21 @@ router.post('/increment-usage', async (req, res) => {
 
     if (!user.isPaid) {
       user.freeChecksUsed += 1;
+      if (userName && !user.userName) user.userName = userName;
       await user.save();
     }
 
-    return res.json({
+    res.json({
       success: true,
       data: {
         freeChecksUsed: user.freeChecksUsed,
-        freeChecksLeft: user.isPaid
-          ? 'Unlimited'
-          : Math.max(LOGGED_IN_FREE_CHECK_LIMIT - user.freeChecksUsed, 0),
+        freeChecksLeft: user.isPaid ? 'Unlimited' : Math.max(LOGGED_IN_FREE_CHECK_LIMIT - user.freeChecksUsed, 0),
         isPaid: user.isPaid,
       },
     });
   } catch (error) {
     console.error('INCREMENT USAGE ERROR:', error);
-    return res.status(500).json({
-      success: false,
-      message: 'Failed to update usage',
-    });
+    res.status(500).json({ success: false, message: 'Failed to update usage' });
   }
 });
 

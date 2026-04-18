@@ -13,25 +13,30 @@ const matchSchema = new mongoose.Schema({
     title: String,
     authors: String,
     year: String,
-    journal: String
-  }
+    journal: String,
+  },
 });
 
 const reportSchema = new mongoose.Schema({
-  // User identification (optional for backward compatibility)
-  userId: { 
-    type: String, 
+  userId: {
+    type: String,
     index: true,
-    sparse: true
+    sparse: true,
   },
   userEmail: {
     type: String,
     index: true,
     sparse: true,
-    lowercase: true
+    lowercase: true,
+    trim: true,
   },
-  
-  // Report data
+  userPhone: {
+    type: String,
+    index: true,
+    sparse: true,
+    trim: true,
+  },
+
   fileName: { type: String, required: true },
   originalText: { type: String, required: true },
   totalWords: { type: Number, required: true },
@@ -46,16 +51,14 @@ const reportSchema = new mongoose.Schema({
     forum: { type: Number, default: 0 },
     ai: { type: Number, default: 0 },
     web: { type: Number, default: 0 },
-    other: { type: Number, default: 0 }
+    other: { type: Number, default: 0 },
   },
   matches: [matchSchema],
-  createdAt: { type: Date, default: Date.now }
-}, {
-  // Add compound index for user-specific queries sorted by date
-  indexes: [
-    { userId: 1, createdAt: -1 },
-    { userEmail: 1, createdAt: -1 }
-  ]
+  createdAt: { type: Date, default: Date.now },
 });
+
+reportSchema.index({ userId: 1, createdAt: -1 });
+reportSchema.index({ userEmail: 1, createdAt: -1 });
+reportSchema.index({ userPhone: 1, createdAt: -1 });
 
 module.exports = mongoose.model('Report', reportSchema);

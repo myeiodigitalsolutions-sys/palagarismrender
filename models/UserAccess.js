@@ -8,13 +8,24 @@ const userAccessSchema = new mongoose.Schema(
       unique: true,
       index: true,
     },
+    userId: {
+      type: String,
+      default: '',
+      index: true,
+    },
+    userName: {
+      type: String,
+      default: '',
+    },
     userEmail: {
       type: String,
       default: '',
+      index: true,
     },
     userPhone: {
       type: String,
       default: '',
+      index: true,
     },
     freeChecksUsed: {
       type: Number,
