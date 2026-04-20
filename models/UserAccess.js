@@ -31,6 +31,10 @@ const userAccessSchema = new mongoose.Schema(
       type: Number,
       default: 0,
     },
+    paidCheckCredits: {
+      type: Number,
+      default: 0,
+    },
     isPaid: {
       type: Boolean,
       default: false,

@@ -23,12 +23,15 @@ const isAdmin = (req, res, next) => {
   next();
 };
 
+const hasPurchasedCheck = (user) =>
+  Boolean(user?.paidAt || user?.razorpayPaymentId || Number(user?.paidCheckCredits || 0) > 0);
+
 router.get('/dashboard', isAdmin, async (req, res) => {
   try {
     const users = await UserAccess.find({})
       .sort({ createdAt: -1 })
       .select(
-        'userId userName userEmail userPhone freeChecksUsed isPaid paidAt createdAt updatedAt'
+        'userId userName userEmail userPhone freeChecksUsed paidCheckCredits isPaid paidAt razorpayOrderId razorpayPaymentId createdAt updatedAt'
       )
       .lean();
 
@@ -38,16 +41,30 @@ router.get('/dashboard', isAdmin, async (req, res) => {
         (user.userEmail || '').toLowerCase() === ADMIN_EMAIL
           ? 'Admin'
           : user.userName || 'User',
+      paidCheckCredits: Number(user.paidCheckCredits || 0),
+      hasPurchased: hasPurchasedCheck(user),
     }));
 
     const totalUsers = enrichedUsers.length;
-    const totalPurchasedUsers = enrichedUsers.filter((u) => u.isPaid).length;
+    const totalPurchasedUsers = enrichedUsers.filter((u) => u.hasPurchased).length;
+    const totalNonPurchasedUsers = enrichedUsers.filter((u) => !u.hasPurchased).length;
+    const totalFreeChecksUsed = enrichedUsers.reduce(
+      (sum, user) => sum + Number(user.freeChecksUsed || 0),
+      0
+    );
+    const totalPaidCheckCredits = enrichedUsers.reduce(
+      (sum, user) => sum + Number(user.paidCheckCredits || 0),
+      0
+    );
 
     res.json({
       success: true,
       data: {
         totalUsers,
         totalPurchasedUsers,
+        totalNonPurchasedUsers,
+        totalFreeChecksUsed,
+        totalPaidCheckCredits,
         users: enrichedUsers,
       },
     });
@@ -95,6 +112,7 @@ router.get('/user-reports', isAdmin, async (req, res) => {
         originalText: 1,
         createdAt: 1,
         plagiarismPercentage: 1,
+        similarityScore: 1,
         totalWords: 1,
         totalSentences: 1,
         userEmail: 1,

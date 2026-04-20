@@ -5,7 +5,7 @@ const UserAccess = require('../models/UserAccess');
 
 const router = express.Router();
 
-const PREMIUM_AMOUNT = 1500;
+const PREMIUM_AMOUNT = 50;
 const LOGGED_IN_FREE_CHECK_LIMIT = 1;
 
 const getUserKey = (req) => {
@@ -20,9 +20,25 @@ const razorpay = new Razorpay({
   key_secret: process.env.RAZORPAY_KEY_SECRET,
 });
 
+const buildUsageData = (user) => {
+  const freeChecksUsed = Number(user.freeChecksUsed || 0);
+  const paidChecksLeft = Number(user.paidCheckCredits || 0);
+  const freeChecksLeft = Math.max(LOGGED_IN_FREE_CHECK_LIMIT - freeChecksUsed, 0);
+
+  return {
+    freeChecksUsed,
+    freeChecksLeft,
+    paidChecksLeft,
+    requiresPayment: freeChecksLeft <= 0 && paidChecksLeft <= 0,
+    isPaid: false,
+    paidAt: user.paidAt || null,
+  };
+};
+
 router.post('/create-order', async (req, res) => {
   try {
     const userKey = getUserKey(req);
+    const userId = (req.headers['x-user-id'] || req.body.userId || '').trim();
     const userName = (req.body.userName || '').trim();
     const userEmail = (req.headers['x-user-email'] || req.body.userEmail || '').trim();
     const userPhone = (req.headers['x-user-phone'] || req.body.userPhone || '').trim();
@@ -35,7 +51,14 @@ router.post('/create-order', async (req, res) => {
       amount: PREMIUM_AMOUNT * 100,
       currency: 'INR',
       receipt: `rcpt_${Date.now()}`,
-      notes: { userKey, userEmail, userPhone, userName },
+      notes: {
+        userKey,
+        userId,
+        userEmail,
+        userPhone,
+        userName,
+        checkType: 'single_paid_check',
+      },
     });
 
     await UserAccess.findOneAndUpdate(
@@ -43,10 +66,16 @@ router.post('/create-order', async (req, res) => {
       {
         $set: {
           userKey,
+          userId,
           userName,
           userEmail,
           userPhone,
           razorpayOrderId: order.id,
+        },
+        $setOnInsert: {
+          freeChecksUsed: 0,
+          paidCheckCredits: 0,
+          isPaid: false,
         },
       },
       { upsert: true, new: true }
@@ -99,14 +128,18 @@ router.post('/verify', async (req, res) => {
       {
         $set: {
           userKey,
+          userId: userId || '',
           userName: userName || '',
           userEmail: userEmail || '',
           userPhone: userPhone || '',
-          isPaid: true,
           paidAt: new Date(),
           razorpayOrderId: razorpay_order_id,
           razorpayPaymentId: razorpay_payment_id,
           razorpaySignature: razorpay_signature,
+          isPaid: false,
+        },
+        $inc: {
+          paidCheckCredits: 1,
         },
       },
       { upsert: true, new: true }
@@ -115,10 +148,7 @@ router.post('/verify', async (req, res) => {
     res.json({
       success: true,
       message: 'Payment verified successfully',
-      data: {
-        isPaid: updatedUser.isPaid,
-        paidAt: updatedUser.paidAt,
-      },
+      data: buildUsageData(updatedUser),
     });
   } catch (error) {
     console.error('VERIFY PAYMENT ERROR:', error);
@@ -129,6 +159,7 @@ router.post('/verify', async (req, res) => {
 router.get('/usage-status', async (req, res) => {
   try {
     const userKey = getUserKey(req);
+    const userId = (req.headers['x-user-id'] || req.query.userId || '').trim();
     const userName = (req.query.userName || '').trim();
     const userEmail = (req.headers['x-user-email'] || req.query.userEmail || '').trim();
     const userPhone = (req.headers['x-user-phone'] || req.query.userPhone || '').trim();
@@ -142,22 +173,19 @@ router.get('/usage-status', async (req, res) => {
     if (!user) {
       user = await UserAccess.create({
         userKey,
+        userId,
         userName,
         userEmail,
         userPhone,
         freeChecksUsed: 0,
+        paidCheckCredits: 0,
         isPaid: false,
       });
     }
 
     res.json({
       success: true,
-      data: {
-        freeChecksUsed: user.freeChecksUsed,
-        freeChecksLeft: user.isPaid ? 'Unlimited' : Math.max(LOGGED_IN_FREE_CHECK_LIMIT - user.freeChecksUsed, 0),
-        isPaid: user.isPaid,
-        paidAt: user.paidAt,
-      },
+      data: buildUsageData(user),
     });
   } catch (error) {
     console.error('USAGE STATUS ERROR:', error);
@@ -168,6 +196,7 @@ router.get('/usage-status', async (req, res) => {
 router.post('/increment-usage', async (req, res) => {
   try {
     const userKey = getUserKey(req);
+    const userId = (req.headers['x-user-id'] || req.body.userId || '').trim();
     const userName = (req.body.userName || '').trim();
     const userEmail = (req.headers['x-user-email'] || req.body.userEmail || '').trim();
     const userPhone = (req.headers['x-user-phone'] || req.body.userPhone || '').trim();
@@ -181,35 +210,41 @@ router.post('/increment-usage', async (req, res) => {
     if (!user) {
       user = await UserAccess.create({
         userKey,
+        userId,
         userName,
         userEmail,
         userPhone,
         freeChecksUsed: 0,
+        paidCheckCredits: 0,
         isPaid: false,
       });
     }
 
-    if (!user.isPaid && user.freeChecksUsed >= LOGGED_IN_FREE_CHECK_LIMIT) {
+    const freeChecksUsed = Number(user.freeChecksUsed || 0);
+    const paidCheckCredits = Number(user.paidCheckCredits || 0);
+
+    if (freeChecksUsed < LOGGED_IN_FREE_CHECK_LIMIT) {
+      user.freeChecksUsed = freeChecksUsed + 1;
+    } else if (paidCheckCredits > 0) {
+      user.paidCheckCredits = paidCheckCredits - 1;
+    } else {
       return res.status(403).json({
         success: false,
-        message: 'Free limit exceeded. Payment required.',
+        message: 'Payment required for this check.',
         paymentRequired: true,
       });
     }
 
-    if (!user.isPaid) {
-      user.freeChecksUsed += 1;
-      if (userName && !user.userName) user.userName = userName;
-      await user.save();
-    }
+    if (userId && !user.userId) user.userId = userId;
+    if (userName && !user.userName) user.userName = userName;
+    if (userEmail && !user.userEmail) user.userEmail = userEmail;
+    if (userPhone && !user.userPhone) user.userPhone = userPhone;
+
+    await user.save();
 
     res.json({
       success: true,
-      data: {
-        freeChecksUsed: user.freeChecksUsed,
-        freeChecksLeft: user.isPaid ? 'Unlimited' : Math.max(LOGGED_IN_FREE_CHECK_LIMIT - user.freeChecksUsed, 0),
-        isPaid: user.isPaid,
-      },
+      data: buildUsageData(user),
     });
   } catch (error) {
     console.error('INCREMENT USAGE ERROR:', error);
