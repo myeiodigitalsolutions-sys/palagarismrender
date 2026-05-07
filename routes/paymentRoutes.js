@@ -1,6 +1,5 @@
 const express = require('express');
-const { Cashfree } = require('cashfree-pg');
-const crypto = require('crypto');
+const { Cashfree, CFEnvironment } = require('cashfree-pg');
 const UserAccess = require('../models/UserAccess');
 
 const router = express.Router();
@@ -8,10 +7,12 @@ const router = express.Router();
 const PREMIUM_AMOUNT = 50;
 const LOGGED_IN_FREE_CHECK_LIMIT = 0;
 
-// Initialize Cashfree
-Cashfree.XClientId = process.env.CASHFREE_APP_ID;
-Cashfree.XClientSecret = process.env.CASHFREE_SECRET_KEY;
-Cashfree.XEnvironment = process.env.CASHFREE_ENV === 'PROD' ? 'PRODUCTION' : 'SANDBOX';
+// Initialize Cashfree — must use 'new' to instantiate
+const cashfree = new Cashfree(
+  process.env.CASHFREE_ENV === 'PROD' ? CFEnvironment.PRODUCTION : CFEnvironment.SANDBOX,
+  process.env.CASHFREE_APP_ID,
+  process.env.CASHFREE_SECRET_KEY
+);
 
 const getUserKey = (req) => {
   const email = (req.headers['x-user-email'] || req.body.userEmail || '').trim().toLowerCase();
@@ -56,7 +57,7 @@ router.post('/create-order', async (req, res) => {
       customer_details: {
         customer_id: userId || userKey,
         customer_email: userEmail || 'user@example.com',
-        customer_phone: userPhone || '9999999999',
+        customer_phone: (userPhone && userPhone.length === 10) ? userPhone : '9999999999',
         customer_name: userName || 'User',
       },
       order_meta: {
@@ -72,7 +73,7 @@ router.post('/create-order', async (req, res) => {
       }),
     };
 
-    const response = await Cashfree.PGCreateOrder('2023-08-01', orderRequest);
+    const response = await cashfree.PGCreateOrder('2023-08-01', orderRequest);
     const order = response.data;
 
     await UserAccess.findOneAndUpdate(
@@ -127,7 +128,7 @@ router.post('/verify', async (req, res) => {
     }
 
     // Verify payment by fetching order status from Cashfree
-    const response = await Cashfree.PGFetchOrder('2023-08-01', orderId);
+    const response = await cashfree.PGFetchOrder('2023-08-01', orderId);
     const orderData = response.data;
 
     if (orderData.order_status !== 'PAID') {
