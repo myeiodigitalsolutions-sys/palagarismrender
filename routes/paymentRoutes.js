@@ -1,12 +1,17 @@
 const express = require('express');
+const { Cashfree } = require('cashfree-pg');
 const crypto = require('crypto');
-const Razorpay = require('razorpay');
 const UserAccess = require('../models/UserAccess');
 
 const router = express.Router();
 
 const PREMIUM_AMOUNT = 50;
-const LOGGED_IN_FREE_CHECK_LIMIT = 1;
+const LOGGED_IN_FREE_CHECK_LIMIT = 0;
+
+// Initialize Cashfree
+Cashfree.XClientId = process.env.CASHFREE_APP_ID;
+Cashfree.XClientSecret = process.env.CASHFREE_SECRET_KEY;
+Cashfree.XEnvironment = process.env.CASHFREE_ENV === 'PROD' ? 'PRODUCTION' : 'SANDBOX';
 
 const getUserKey = (req) => {
   const email = (req.headers['x-user-email'] || req.body.userEmail || '').trim().toLowerCase();
@@ -14,11 +19,6 @@ const getUserKey = (req) => {
   const userId = (req.headers['x-user-id'] || req.body.userId || '').trim();
   return email || phone || userId;
 };
-
-const razorpay = new Razorpay({
-  key_id: process.env.RAZORPAY_KEY_ID,
-  key_secret: process.env.RAZORPAY_KEY_SECRET,
-});
 
 const buildUsageData = (user) => {
   const freeChecksUsed = Number(user.freeChecksUsed || 0);
@@ -47,19 +47,33 @@ router.post('/create-order', async (req, res) => {
       return res.status(400).json({ success: false, message: 'User identity is required' });
     }
 
-    const order = await razorpay.orders.create({
-      amount: PREMIUM_AMOUNT * 100,
-      currency: 'INR',
-      receipt: `rcpt_${Date.now()}`,
-      notes: {
+    const orderId = `order_${Date.now()}`;
+
+    const orderRequest = {
+      order_id: orderId,
+      order_amount: PREMIUM_AMOUNT,
+      order_currency: 'INR',
+      customer_details: {
+        customer_id: userId || userKey,
+        customer_email: userEmail || 'user@example.com',
+        customer_phone: userPhone || '9999999999',
+        customer_name: userName || 'User',
+      },
+      order_meta: {
+        return_url: `${process.env.FRONTEND_URL}/payment-success?order_id={order_id}`,
+      },
+      order_note: JSON.stringify({
         userKey,
         userId,
         userEmail,
         userPhone,
         userName,
         checkType: 'single_paid_check',
-      },
-    });
+      }),
+    };
+
+    const response = await Cashfree.PGCreateOrder('2023-08-01', orderRequest);
+    const order = response.data;
 
     await UserAccess.findOneAndUpdate(
       { userKey },
@@ -70,7 +84,7 @@ router.post('/create-order', async (req, res) => {
           userName,
           userEmail,
           userPhone,
-          razorpayOrderId: order.id,
+          cashfreeOrderId: order.order_id,
         },
         $setOnInsert: {
           freeChecksUsed: 0,
@@ -84,21 +98,19 @@ router.post('/create-order', async (req, res) => {
     res.json({
       success: true,
       order,
-      key: process.env.RAZORPAY_KEY_ID,
+      appId: process.env.CASHFREE_APP_ID,
       amount: PREMIUM_AMOUNT,
     });
   } catch (error) {
     console.error('CREATE ORDER ERROR:', error);
-    res.status(500).json({ success: false, message: 'Failed to create Razorpay order' });
+    res.status(500).json({ success: false, message: 'Failed to create Cashfree order' });
   }
 });
 
 router.post('/verify', async (req, res) => {
   try {
     const {
-      razorpay_order_id,
-      razorpay_payment_id,
-      razorpay_signature,
+      orderId,
       userId,
       userName,
       userEmail,
@@ -110,17 +122,16 @@ router.post('/verify', async (req, res) => {
       (userPhone || '').trim() ||
       (userId || '').trim();
 
-    if (!userKey || !razorpay_order_id || !razorpay_payment_id || !razorpay_signature) {
+    if (!userKey || !orderId) {
       return res.status(400).json({ success: false, message: 'Missing payment details' });
     }
 
-    const generatedSignature = crypto
-      .createHmac('sha256', process.env.RAZORPAY_KEY_SECRET)
-      .update(`${razorpay_order_id}|${razorpay_payment_id}`)
-      .digest('hex');
+    // Verify payment by fetching order status from Cashfree
+    const response = await Cashfree.PGFetchOrder('2023-08-01', orderId);
+    const orderData = response.data;
 
-    if (generatedSignature !== razorpay_signature) {
-      return res.status(400).json({ success: false, message: 'Invalid payment signature' });
+    if (orderData.order_status !== 'PAID') {
+      return res.status(400).json({ success: false, message: 'Payment not completed' });
     }
 
     const updatedUser = await UserAccess.findOneAndUpdate(
@@ -133,9 +144,7 @@ router.post('/verify', async (req, res) => {
           userEmail: userEmail || '',
           userPhone: userPhone || '',
           paidAt: new Date(),
-          razorpayOrderId: razorpay_order_id,
-          razorpayPaymentId: razorpay_payment_id,
-          razorpaySignature: razorpay_signature,
+          cashfreeOrderId: orderId,
           isPaid: false,
         },
         $inc: {
