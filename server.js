@@ -173,10 +173,10 @@ app.get('/api/status', (req, res) => {
       enabled: !!process.env.EXA_API_KEY,
       keyPresent: !!process.env.EXA_API_KEY
     },
-    razorpay: {
-      enabled: !!(process.env.RAZORPAY_KEY_ID && process.env.RAZORPAY_KEY_SECRET),
-      keyPresent: !!process.env.RAZORPAY_KEY_ID,
-      secretPresent: !!process.env.RAZORPAY_KEY_SECRET
+    cashfree: {
+      enabled: !!(process.env.CASHFREE_APP_ID && process.env.CASHFREE_SECRET_KEY),
+      appIdPresent: !!process.env.CASHFREE_APP_ID,
+      secretPresent: !!process.env.CASHFREE_SECRET_KEY
     }
   };
 
@@ -272,7 +272,7 @@ const server = app.listen(PORT, () => {
 │  🌐 URL: http://localhost:${PORT}
 │  ⏰ Timeout: 30 minutes
 │  📁 Uploads: ${uploadDir}
-│  💳 Razorpay: ${process.env.RAZORPAY_KEY_ID ? 'Enabled' : 'Disabled'}
+│  💳 Cashfree: ${process.env.CASHFREE_APP_ID ? 'Enabled' : 'Disabled'}
 ├─────────────────────────────────────┤
 │  ✅ Server is ready                 │
 └─────────────────────────────────────┘
