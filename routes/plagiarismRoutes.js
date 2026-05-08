@@ -1,296 +1,258 @@
 const express = require('express');
+const { Cashfree, CFEnvironment } = require('cashfree-pg');
+const UserAccess = require('../models/UserAccess');
+
 const router = express.Router();
-const fs = require('fs');
-const upload = require('../middleware/upload');
-const Report = require('../models/Report');
-const { extractText, splitIntoSentences, countWords } = require('../utils/textExtractor');
-const { checkPlagiarism } = require('../utils/plagiarismChecker');
 
-// ─── Helper: build & save report with user info ─────────────────────────────
-const buildReport = async (
-  fileName,
-  text,
-  matches,
-  userId = null,
-  userEmail = null,
-  userPhone = null
-) => {
-  const plagiarized = matches.filter((m) => m.isPlagiarized);
-  const plagiarismPercent = Math.round((plagiarized.length / matches.length) * 100) || 0;
+const PREMIUM_AMOUNT = 50;
+const LOGGED_IN_FREE_CHECK_LIMIT = 0;
 
-  const sourceTypes = {
-    educational: matches.filter((m) => m.source === 'educational').length,
-    journal: matches.filter((m) => m.source === 'journal' || m.source === 'academic').length,
-    wiki: matches.filter((m) => m.source === 'wiki').length,
-    forum: matches.filter((m) => m.source === 'forum').length,
-    ai: matches.filter((m) => m.source === 'ai-generated').length,
-    web: matches.filter((m) => m.source === 'web').length,
-    other: matches.filter(
-      (m) =>
-        !['educational', 'journal', 'academic', 'wiki', 'forum', 'ai-generated', 'web'].includes(
-          m.source
-        )
-    ).length,
-  };
+// cashfree-pg v5.x — constructor takes (environment, appId, secretKey)
+const cashfree = new Cashfree(
+  process.env.CASHFREE_ENV === 'PROD' ? CFEnvironment.PRODUCTION : CFEnvironment.SANDBOX,
+  process.env.CASHFREE_APP_ID,
+  process.env.CASHFREE_SECRET_KEY
+);
 
-  const reportData = {
-    fileName,
-    originalText: text.substring(0, 10000),
-    totalWords: countWords(text),
-    totalSentences: matches.length,
-    plagiarizedSentences: plagiarized.length,
-    originalSentences: matches.length - plagiarized.length,
-    plagiarismPercentage: plagiarismPercent,
-    matches,
-    sourceTypes,
-  };
-
-  if (userId) reportData.userId = String(userId).trim();
-  if (userEmail) reportData.userEmail = String(userEmail).trim().toLowerCase();
-  if (userPhone) reportData.userPhone = String(userPhone).trim();
-
-  const report = new Report(reportData);
-  await report.save();
-  return report;
+const getUserKey = (req) => {
+  const email = (req.headers['x-user-email'] || req.body.userEmail || '').trim().toLowerCase();
+  const phone = (req.headers['x-user-phone'] || req.body.userPhone || '').trim();
+  const userId = (req.headers['x-user-id'] || req.body.userId || '').trim();
+  return email || phone || userId;
 };
 
-// ─── POST /api/plagiarism/check-file ─────────────────────────────────────────
-router.post('/check-file', upload.single('file'), async (req, res) => {
-  if (!req.file) {
-    return res.status(400).json({ success: false, message: 'No file uploaded.' });
-  }
+const buildUsageData = (user) => {
+  const freeChecksUsed = Number(user.freeChecksUsed || 0);
+  const paidChecksLeft = Number(user.paidCheckCredits || 0);
+  const freeChecksLeft = Math.max(LOGGED_IN_FREE_CHECK_LIMIT - freeChecksUsed, 0);
 
-  const userId = req.headers['x-user-id'] || req.body.userId;
-  const userEmail = req.headers['x-user-email'] || req.body.userEmail;
-  const userPhone = req.headers['x-user-phone'] || req.body.userPhone;
+  return {
+    freeChecksUsed,
+    freeChecksLeft,
+    paidChecksLeft,
+    requiresPayment: freeChecksLeft <= 0 && paidChecksLeft <= 0,
+    isPaid: false,
+    paidAt: user.paidAt || null,
+  };
+};
 
-  const filePath = req.file.path;
-  const startTime = Date.now();
-
+router.post('/create-order', async (req, res) => {
   try {
-    console.log(
-      `\n📄 Processing file: ${req.file.originalname} ${
-        userId || userEmail || userPhone ? `for user: ${userEmail || userPhone || userId}` : ''
-      }`
+    const userKey = getUserKey(req);
+    const userId = (req.headers['x-user-id'] || req.body.userId || '').trim();
+    const userName = (req.body.userName || '').trim();
+    const userEmail = (req.headers['x-user-email'] || req.body.userEmail || '').trim();
+    const userPhone = (req.headers['x-user-phone'] || req.body.userPhone || '').trim();
+
+    if (!userKey) {
+      return res.status(400).json({ success: false, message: 'User identity is required' });
+    }
+
+    const orderId = `order_${Date.now()}`;
+
+    // cashfree-pg v5.x — PGCreateOrder(requestObject) — NO version argument
+    const orderRequest = {
+      order_id: orderId,
+      order_amount: PREMIUM_AMOUNT,
+      order_currency: 'INR',
+      customer_details: {
+        customer_id: (userId || userKey).substring(0, 50),
+        customer_email: userEmail || 'user@example.com',
+        customer_phone: (userPhone && userPhone.length === 10) ? userPhone : '9999999999',
+        customer_name: userName || 'User',
+      },
+      order_meta: {
+        return_url: `${process.env.FRONTEND_URL}/payment-success?order_id={order_id}`,
+        notify_url: `https://palagarismrender.onrender.com/api/payment/verify`,
+      },
+    };
+
+    const response = await cashfree.PGCreateOrder(orderRequest);
+    const order = response.data;
+
+    await UserAccess.findOneAndUpdate(
+      { userKey },
+      {
+        $set: {
+          userKey,
+          userId,
+          userName,
+          userEmail,
+          userPhone,
+          cashfreeOrderId: order.order_id,
+        },
+        $setOnInsert: {
+          freeChecksUsed: 0,
+          paidCheckCredits: 0,
+          isPaid: false,
+        },
+      },
+      { upsert: true, new: true }
     );
 
-    const text = await extractText(filePath, req.file.originalname);
-    if (!text || text.trim().length < 30) {
-      if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
-      return res.status(400).json({
-        success: false,
-        message:
-          'File has insufficient text content. Please ensure the file contains at least 30 characters of text.',
-      });
-    }
+    res.json({
+      success: true,
+      order,
+      appId: process.env.CASHFREE_APP_ID,
+      amount: PREMIUM_AMOUNT,
+    });
+  } catch (error) {
+    console.error('CREATE ORDER ERROR:', error?.response?.data || error);
+    res.status(500).json({ success: false, message: 'Failed to create Cashfree order' });
+  }
+});
 
-    const allSentences = splitIntoSentences(text);
-    if (allSentences.length === 0) {
-      if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
-      return res.status(400).json({
-        success: false,
-        message: 'No complete sentences found. Make sure the document contains full sentences.',
-      });
-    }
-
-    const toCheck = allSentences.slice(0, 25);
-    console.log(`📊 Sentences extracted: ${allSentences.length} → checking: ${toCheck.length}`);
-
-    const matches = await checkPlagiarism(toCheck);
-    const report = await buildReport(
-      req.file.originalname,
-      text,
-      matches,
+router.post('/verify', async (req, res) => {
+  try {
+    const {
+      orderId,
       userId,
+      userName,
       userEmail,
-      userPhone
+      userPhone,
+    } = req.body;
+
+    const userKey =
+      (userEmail || '').trim().toLowerCase() ||
+      (userPhone || '').trim() ||
+      (userId || '').trim();
+
+    if (!userKey || !orderId) {
+      return res.status(400).json({ success: false, message: 'Missing payment details' });
+    }
+
+    // cashfree-pg v5.x — PGFetchOrder(orderId) — NO version argument
+    const response = await cashfree.PGFetchOrder(orderId);
+    const orderData = response.data;
+
+    if (orderData.order_status !== 'PAID') {
+      return res.status(400).json({ success: false, message: 'Payment not completed' });
+    }
+
+    const updatedUser = await UserAccess.findOneAndUpdate(
+      { userKey },
+      {
+        $set: {
+          userKey,
+          userId: userId || '',
+          userName: userName || '',
+          userEmail: userEmail || '',
+          userPhone: userPhone || '',
+          paidAt: new Date(),
+          cashfreeOrderId: orderId,
+          isPaid: false,
+        },
+        $inc: {
+          paidCheckCredits: 1,
+        },
+      },
+      { upsert: true, new: true }
     );
 
-    if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
-
-    const timeTaken = ((Date.now() - startTime) / 1000).toFixed(1);
-    console.log(`✅ Completed in ${timeTaken}s — Plagiarism: ${report.plagiarismPercentage}%`);
-
-    return res.json({
+    res.json({
       success: true,
-      report: {
-        id: report._id,
-        fileName: report.fileName,
-        totalWords: report.totalWords,
-        totalSentences: report.totalSentences,
-        plagiarizedSentences: report.plagiarizedSentences,
-        originalSentences: report.originalSentences,
-        plagiarismPercentage: report.plagiarismPercentage,
-        sourceTypes: report.sourceTypes,
-        matches: report.matches,
-        createdAt: report.createdAt,
-      },
+      message: 'Payment verified successfully',
+      data: buildUsageData(updatedUser),
     });
-  } catch (err) {
-    console.error('❌ check-file error:', err.message);
-    console.error('Stack:', err.stack);
-
-    if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
-
-    return res.status(500).json({
-      success: false,
-      message: err.message || 'Plagiarism check failed. Please try again.',
-    });
+  } catch (error) {
+    console.error('VERIFY PAYMENT ERROR:', error?.response?.data || error);
+    res.status(500).json({ success: false, message: 'Payment verification failed' });
   }
 });
 
-// ─── POST /api/plagiarism/check-text ─────────────────────────────────────────
-router.post('/check-text', async (req, res) => {
-  const { text, fileName = 'Pasted Text', userId, userEmail, userPhone } = req.body;
-  const startTime = Date.now();
-
-  const finalUserId = userId || req.headers['x-user-id'];
-  const finalUserEmail = userEmail || req.headers['x-user-email'];
-  const finalUserPhone = userPhone || req.headers['x-user-phone'];
-
-  if (!text || text.trim().length < 30) {
-    return res.status(400).json({
-      success: false,
-      message: 'Please provide at least 30 characters of text.',
-    });
-  }
-
+router.get('/usage-status', async (req, res) => {
   try {
-    console.log(
-      `\n📝 Text check - analyzing ${text.length} characters ${
-        finalUserId || finalUserEmail || finalUserPhone
-          ? `for user: ${finalUserEmail || finalUserPhone || finalUserId}`
-          : ''
-      }`
-    );
+    const userKey = getUserKey(req);
+    const userId = (req.headers['x-user-id'] || req.query.userId || '').trim();
+    const userName = (req.query.userName || '').trim();
+    const userEmail = (req.headers['x-user-email'] || req.query.userEmail || '').trim();
+    const userPhone = (req.headers['x-user-phone'] || req.query.userPhone || '').trim();
 
-    const allSentences = splitIntoSentences(text);
-    if (allSentences.length === 0) {
-      return res.status(400).json({
-        success: false,
-        message: 'No complete sentences found. Please enter full sentences (not just keywords).',
+    if (!userKey) {
+      return res.status(400).json({ success: false, message: 'User identity is required' });
+    }
+
+    let user = await UserAccess.findOne({ userKey });
+
+    if (!user) {
+      user = await UserAccess.create({
+        userKey,
+        userId,
+        userName,
+        userEmail,
+        userPhone,
+        freeChecksUsed: 0,
+        paidCheckCredits: 0,
+        isPaid: false,
       });
     }
 
-    const toCheck = allSentences.slice(0, 25);
-    console.log(`📊 Sentences extracted: ${allSentences.length} → checking: ${toCheck.length}`);
-
-    const matches = await checkPlagiarism(toCheck);
-    const report = await buildReport(
-      fileName,
-      text,
-      matches,
-      finalUserId,
-      finalUserEmail,
-      finalUserPhone
-    );
-
-    const timeTaken = ((Date.now() - startTime) / 1000).toFixed(1);
-    console.log(`✅ Completed in ${timeTaken}s — Plagiarism: ${report.plagiarismPercentage}%`);
-
-    return res.json({
+    res.json({
       success: true,
-      report: {
-        id: report._id,
-        fileName: report.fileName,
-        totalWords: report.totalWords,
-        totalSentences: report.totalSentences,
-        plagiarizedSentences: report.plagiarizedSentences,
-        originalSentences: report.originalSentences,
-        plagiarismPercentage: report.plagiarismPercentage,
-        sourceTypes: report.sourceTypes,
-        matches: report.matches,
-        createdAt: report.createdAt,
-      },
+      data: buildUsageData(user),
     });
-  } catch (err) {
-    console.error('❌ check-text error:', err.message);
-    console.error('Stack:', err.stack);
-
-    return res.status(500).json({
-      success: false,
-      message: err.message || 'Plagiarism check failed. Please try again.',
-    });
+  } catch (error) {
+    console.error('USAGE STATUS ERROR:', error);
+    res.status(500).json({ success: false, message: 'Failed to fetch usage status' });
   }
 });
 
-// ─── GET /api/plagiarism/history ──────────────────────────────────────────────
-router.get('/history', async (req, res) => {
+router.post('/increment-usage', async (req, res) => {
   try {
-    const userId = req.headers['x-user-id'] || req.query.userId;
-    const userEmail = req.headers['x-user-email'] || req.query.userEmail;
-    const userPhone = req.headers['x-user-phone'] || req.query.userPhone;
+    const userKey = getUserKey(req);
+    const userId = (req.headers['x-user-id'] || req.body.userId || '').trim();
+    const userName = (req.body.userName || '').trim();
+    const userEmail = (req.headers['x-user-email'] || req.body.userEmail || '').trim();
+    const userPhone = (req.headers['x-user-phone'] || req.body.userPhone || '').trim();
 
-    let query = {};
-
-    if (userId || userEmail || userPhone) {
-      query = { $or: [] };
-      if (userId) query.$or.push({ userId: String(userId).trim() });
-      if (userEmail) query.$or.push({ userEmail: String(userEmail).trim().toLowerCase() });
-      if (userPhone) query.$or.push({ userPhone: String(userPhone).trim() });
+    if (!userKey) {
+      return res.status(400).json({ success: false, message: 'User identity is required' });
     }
 
-    const reports = await Report.find(query)
-      .select(
-        'fileName totalWords totalSentences plagiarismPercentage sourceTypes createdAt userId userEmail userPhone'
-      )
-      .sort({ createdAt: -1 })
-      .limit(20);
+    let user = await UserAccess.findOne({ userKey });
 
-    console.log(
-      `📊 Found ${reports.length} reports ${
-        userId || userEmail || userPhone ? `for user ${userEmail || userPhone || userId}` : '(all users)'
-      }`
-    );
-
-    return res.json({
-      success: true,
-      reports: reports || [],
-    });
-  } catch (err) {
-    console.error('❌ history error:', err.message);
-    return res.status(500).json({
-      success: false,
-      message: err.message,
-    });
-  }
-});
-
-// ─── GET /api/plagiarism/report/:id ──────────────────────────────────────────
-router.get('/report/:id', async (req, res) => {
-  try {
-    const userId = req.headers['x-user-id'] || req.query.userId;
-    const userEmail = req.headers['x-user-email'] || req.query.userEmail;
-    const userPhone = req.headers['x-user-phone'] || req.query.userPhone;
-
-    let query = { _id: req.params.id };
-
-    if (userId || userEmail || userPhone) {
-      query.$or = [];
-      if (userId) query.$or.push({ userId: String(userId).trim() });
-      if (userEmail) query.$or.push({ userEmail: String(userEmail).trim().toLowerCase() });
-      if (userPhone) query.$or.push({ userPhone: String(userPhone).trim() });
-    }
-
-    const report = await Report.findOne(query);
-
-    if (!report) {
-      return res.status(404).json({
-        success: false,
-        message: 'Report not found.',
+    if (!user) {
+      user = await UserAccess.create({
+        userKey,
+        userId,
+        userName,
+        userEmail,
+        userPhone,
+        freeChecksUsed: 0,
+        paidCheckCredits: 0,
+        isPaid: false,
       });
     }
 
-    return res.json({
+    const freeChecksUsed = Number(user.freeChecksUsed || 0);
+    const paidCheckCredits = Number(user.paidCheckCredits || 0);
+
+    if (freeChecksUsed < LOGGED_IN_FREE_CHECK_LIMIT) {
+      user.freeChecksUsed = freeChecksUsed + 1;
+    } else if (paidCheckCredits > 0) {
+      user.paidCheckCredits = paidCheckCredits - 1;
+    } else {
+      return res.status(403).json({
+        success: false,
+        message: 'Payment required for this check.',
+        paymentRequired: true,
+      });
+    }
+
+    if (userId && !user.userId) user.userId = userId;
+    if (userName && !user.userName) user.userName = userName;
+    if (userEmail && !user.userEmail) user.userEmail = userEmail;
+    if (userPhone && !user.userPhone) user.userPhone = userPhone;
+
+    await user.save();
+
+    res.json({
       success: true,
-      report,
+      data: buildUsageData(user),
     });
-  } catch (err) {
-    console.error('❌ report fetch error:', err.message);
-    return res.status(500).json({
-      success: false,
-      message: err.message,
-    });
+  } catch (error) {
+    console.error('INCREMENT USAGE ERROR:', error);
+    res.status(500).json({ success: false, message: 'Failed to update usage' });
   }
 });
 
