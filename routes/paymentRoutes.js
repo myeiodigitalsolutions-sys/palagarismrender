@@ -50,27 +50,21 @@ router.post('/create-order', async (req, res) => {
 
     const orderId = `order_${Date.now()}`;
 
+    // Correct Cashfree order request format
     const orderRequest = {
       order_id: orderId,
       order_amount: PREMIUM_AMOUNT,
       order_currency: 'INR',
       customer_details: {
-        customer_id: userId || userKey,
+        customer_id: (userId || userKey).substring(0, 50),
         customer_email: userEmail || 'user@example.com',
         customer_phone: (userPhone && userPhone.length === 10) ? userPhone : '9999999999',
         customer_name: userName || 'User',
       },
       order_meta: {
         return_url: `${process.env.FRONTEND_URL}/payment-success?order_id={order_id}`,
+        notify_url: `${process.env.BACKEND_URL || 'https://palagarismrender.onrender.com'}/api/payment/verify`,
       },
-      order_note: JSON.stringify({
-        userKey,
-        userId,
-        userEmail,
-        userPhone,
-        userName,
-        checkType: 'single_paid_check',
-      }),
     };
 
     const response = await cashfree.PGCreateOrder('2023-08-01', orderRequest);
@@ -103,7 +97,7 @@ router.post('/create-order', async (req, res) => {
       amount: PREMIUM_AMOUNT,
     });
   } catch (error) {
-    console.error('CREATE ORDER ERROR:', error);
+    console.error('CREATE ORDER ERROR:', error?.response?.data || error);
     res.status(500).json({ success: false, message: 'Failed to create Cashfree order' });
   }
 });
@@ -161,7 +155,7 @@ router.post('/verify', async (req, res) => {
       data: buildUsageData(updatedUser),
     });
   } catch (error) {
-    console.error('VERIFY PAYMENT ERROR:', error);
+    console.error('VERIFY PAYMENT ERROR:', error?.response?.data || error);
     res.status(500).json({ success: false, message: 'Payment verification failed' });
   }
 });
