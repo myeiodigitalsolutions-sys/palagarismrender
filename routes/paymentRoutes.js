@@ -7,12 +7,15 @@ const router = express.Router();
 const PREMIUM_AMOUNT = 50;
 const LOGGED_IN_FREE_CHECK_LIMIT = 0;
 
-// Initialize Cashfree — must use 'new' to instantiate
+// Initialize Cashfree — v5.x uses class instantiation
 const cashfree = new Cashfree(
   process.env.CASHFREE_ENV === 'PROD' ? CFEnvironment.PRODUCTION : CFEnvironment.SANDBOX,
   process.env.CASHFREE_APP_ID,
   process.env.CASHFREE_SECRET_KEY
 );
+
+// Use the version that matches installed cashfree-pg v5.x
+const CF_API_VERSION = cashfree.XApiVersion; // '2025-01-01'
 
 const getUserKey = (req) => {
   const email = (req.headers['x-user-email'] || req.body.userEmail || '').trim().toLowerCase();
@@ -50,7 +53,6 @@ router.post('/create-order', async (req, res) => {
 
     const orderId = `order_${Date.now()}`;
 
-    // Correct Cashfree order request format
     const orderRequest = {
       order_id: orderId,
       order_amount: PREMIUM_AMOUNT,
@@ -63,11 +65,11 @@ router.post('/create-order', async (req, res) => {
       },
       order_meta: {
         return_url: `${process.env.FRONTEND_URL}/payment-success?order_id={order_id}`,
-        notify_url: `${process.env.BACKEND_URL || 'https://palagarismrender.onrender.com'}/api/payment/verify`,
+        notify_url: `https://palagarismrender.onrender.com/api/payment/verify`,
       },
     };
 
-    const response = await cashfree.PGCreateOrder('2023-08-01', orderRequest);
+    const response = await cashfree.PGCreateOrder(CF_API_VERSION, orderRequest);
     const order = response.data;
 
     await UserAccess.findOneAndUpdate(
@@ -121,8 +123,7 @@ router.post('/verify', async (req, res) => {
       return res.status(400).json({ success: false, message: 'Missing payment details' });
     }
 
-    // Verify payment by fetching order status from Cashfree
-    const response = await cashfree.PGFetchOrder('2023-08-01', orderId);
+    const response = await cashfree.PGFetchOrder(CF_API_VERSION, orderId);
     const orderData = response.data;
 
     if (orderData.order_status !== 'PAID') {
