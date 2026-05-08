@@ -43,15 +43,15 @@ const userAccessSchema = new mongoose.Schema(
       type: Date,
       default: null,
     },
-    razorpayOrderId: {
+    cashfreeOrderId: {
       type: String,
       default: '',
     },
-    razorpayPaymentId: {
+    cashfreePaymentId: {
       type: String,
       default: '',
     },
-    razorpaySignature: {
+    cashfreePaymentStatus: {
       type: String,
       default: '',
     },
