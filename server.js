@@ -23,7 +23,7 @@ if (!fs.existsSync(uploadDir)) {
 const allowedOrigins = [
   'http://localhost:3000',
   'http://localhost:5000',
-  'http://127.0.0.1:3000',
+  'https://unimall-ecommerce.vercel.app',
   'https://palagarismrender.onrender.com',
   'https://plagiarism-checker-olive.vercel.app'
 ];
